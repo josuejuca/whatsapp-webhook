@@ -84,18 +84,47 @@ class DatabaseStorage:
             """)
             print("✓ Tabela 'webhook' verificada/criada")
             
-            # Tabela contacts
+            # Tabela contacts - CHAVE COMPOSTA (wa_id + create_for_phone_number)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS contacts (
                     id INT AUTO_INCREMENT PRIMARY KEY,
-                    wa_id VARCHAR(50) UNIQUE NOT NULL,
-                    profile TEXT,
+                    wa_id VARCHAR(50) NOT NULL,
+                    profile VARCHAR(50) DEFAULT 'human',
                     name VARCHAR(255),
                     create_in DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    last_message DATETIME
+                    activate_bot BOOLEAN DEFAULT FALSE,
+                    activate_automatic_message BOOLEAN DEFAULT FALSE,
+                    create_for_phone_number VARCHAR(50) NOT NULL,
+                    last_message_timestamp BIGINT,
+                    UNIQUE KEY unique_conversation (wa_id, create_for_phone_number)
                 )
             """)
             print("✓ Tabela 'contacts' verificada/criada")
+            
+            # Tabela settings
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS settings (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    default_bot VARCHAR(50),
+                    default_profile VARCHAR(50) DEFAULT 'human',
+                    wa_id VARCHAR(50),
+                    phone_number_id VARCHAR(50),
+                    webhook_verify_token VARCHAR(255),
+                    meta_token TEXT
+                )
+            """)
+            print("✓ Tabela 'settings' verificada/criada")
+            
+            # Insere configuração padrão se não existir
+            cursor.execute("SELECT COUNT(*) FROM settings")
+            count = cursor.fetchone()[0]
+            if count == 0:
+                meta_token = os.getenv("META_TOKEN", None)
+                cursor.execute("""
+                    INSERT INTO settings (default_bot, default_profile, wa_id, phone_number_id, webhook_verify_token, meta_token) 
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                """, (None, 'human', '556181412286', '524386454098961', '7b5a67574d8b1d77d2803b24946950f0', meta_token))
+                print("✓ Configuração padrão inserida")
             
             conn.commit()
             cursor.close()
@@ -147,36 +176,80 @@ class DatabaseStorage:
             print(f"Erro ao salvar webhook: {e}")
             return None
 
-    def save_or_update_contact(self, wa_id: str, name: str, profile: Optional[str] = None) -> bool:
-        """Salva ou atualiza um contato"""
+    def save_or_update_contact(
+        self, 
+        wa_id: str, 
+        name: str,
+        phone_number_id: str,
+        timestamp: int
+    ) -> bool:
+        """Salva ou atualiza um contato com base nas configurações"""
         try:
             conn = self._get_connection()
             if not conn:
                 return False
             
-            cursor = conn.cursor()
+            cursor = conn.cursor(dictionary=True)
             
-            # Verifica se contato existe
-            cursor.execute("SELECT id FROM contacts WHERE wa_id = %s", (wa_id,))
-            exists = cursor.fetchone()
+            # Busca configurações do número
+            cursor.execute(
+                "SELECT default_profile FROM settings WHERE phone_number_id = %s", 
+                (phone_number_id,)
+            )
+            settings = cursor.fetchone()
             
-            if exists:
-                # Atualiza
+            # Define profile e activate_bot baseado nas settings
+            if settings:
+                profile = settings.get('default_profile', 'human')
+                activate_bot = False if profile == 'human' else True
+            else:
+                profile = 'human'
+                activate_bot = False
+            
+            # Verifica se ESTA CONVERSA ESPECÍFICA existe (wa_id + phone_number_id)
+            cursor.execute(
+                "SELECT id, create_in FROM contacts WHERE wa_id = %s AND create_for_phone_number = %s", 
+                (wa_id, phone_number_id)
+            )
+            contact = cursor.fetchone()
+            
+            if contact:
+                # Conversa já existe - atualiza
                 query = """
                     UPDATE contacts 
-                    SET name = %s, profile = %s, last_message = %s 
-                    WHERE wa_id = %s
+                    SET name = %s, last_message_timestamp = %s 
+                    WHERE wa_id = %s AND create_for_phone_number = %s
                 """
-                cursor.execute(query, (name, profile, datetime.now(), wa_id))
-                print(f"✓ Contato {wa_id} atualizado")
+                cursor.execute(query, (name, timestamp, wa_id, phone_number_id))
+                
+                first_message_date = contact['create_in'].strftime('%d/%m/%Y %H:%M:%S')
+                print(f"✓ Contato {wa_id} ({name}) atualizado")
+                print(f"  └─ Conversa com número: {phone_number_id}")
+                print(f"  └─ Primeira mensagem desta conversa foi em: {first_message_date}")
+                print(f"  └─ Esta é mais uma mensagem nesta conversa")
             else:
-                # Insere
+                # Nova conversa - insere
                 query = """
-                    INSERT INTO contacts (wa_id, name, profile, last_message) 
-                    VALUES (%s, %s, %s, %s)
+                    INSERT INTO contacts 
+                    (wa_id, name, profile, create_for_phone_number, last_message_timestamp, activate_bot, activate_automatic_message) 
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
                 """
-                cursor.execute(query, (wa_id, name, profile, datetime.now()))
-                print(f"✓ Contato {wa_id} criado")
+                cursor.execute(query, (
+                    wa_id, 
+                    name, 
+                    profile, 
+                    phone_number_id, 
+                    timestamp, 
+                    activate_bot, 
+                    False
+                ))
+                
+                now = datetime.now().strftime('%d/%m/%Y %H:%M:%S')
+                print(f"✓ Nova conversa criada: {wa_id} ({name}) → {phone_number_id}")
+                print(f"  └─ Esta é a PRIMEIRA mensagem desta conversa")
+                print(f"  └─ Criado em: {now}")
+                print(f"  └─ Profile: {profile}")
+                print(f"  └─ Bot ativado: {activate_bot}")
             
             conn.commit()
             cursor.close()
@@ -185,6 +258,24 @@ class DatabaseStorage:
         except Error as e:
             print(f"Erro ao salvar/atualizar contato: {e}")
             return False
+
+    def get_settings(self) -> Optional[Dict[str, Any]]:
+        """Busca as configurações do sistema"""
+        try:
+            conn = self._get_connection()
+            if not conn:
+                return None
+            
+            cursor = conn.cursor(dictionary=True)
+            cursor.execute("SELECT * FROM settings WHERE id = 1")
+            settings = cursor.fetchone()
+            
+            cursor.close()
+            conn.close()
+            return settings
+        except Error as e:
+            print(f"Erro ao buscar configurações: {e}")
+            return None
 
 # Instância global
 db = DatabaseStorage()

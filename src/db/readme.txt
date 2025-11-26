@@ -9,7 +9,19 @@ Banco de dados do MySQL
 - contacts
     - id 
     - wa_id 
-    - profile
+    - profile # (human, bot, ia) 
     - name 
     - create_in
-    - last_message
+    - activate_bot # true or false
+    - activate_automatic_message # true or false
+    - create_for_phone_number 
+    - last_message_timestamp
+- settings
+    - id
+    - default_bot
+    - default_profile # human
+    - wa_id
+    - phone_number_id 
+    - webhook_verify_token 
+    - meta_token
+
